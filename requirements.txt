@@ -1,0 +1,2 @@
+# Stdlib only — bot.py uses urllib/json only, no pip installs.
+# This empty file exists so Railway/Nixpacks detects a Python app.
