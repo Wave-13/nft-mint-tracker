@@ -387,6 +387,49 @@ def handle_message(state, chat_id, text):
             "/upcoming for the verified mints, or /help.")
 
 
+# ---------------------------------------------------------------- mini app bridge
+# The mini app (GitHub Pages) has no back end of its own, so its Track /
+# Add-a-mint buttons send the mint to the bot with
+# Telegram.WebApp.sendData(). Telegram delivers that as a message with
+# web_app_data, and the bot saves it exactly like /add or /track — so a
+# tap in the mini app really turns the beeps on.
+def handle_web_app_data(state, chat_id, data_str):
+    try:
+        data = json.loads(data_str or "{}")
+    except Exception:
+        return "I could not read that from the mini app. Try again from the bot with /add."
+    mint = data.get("mint") or {}
+    name = (mint.get("name") or "").strip()
+    when = (mint.get("mint_time_utc") or "").strip()
+    if not name or not when:
+        return "That mint had no name or date. Try adding it again from the mini app."
+    try:
+        mint_time = datetime.fromisoformat(when.replace("Z", "+00:00"))
+        if mint_time.tzinfo is None:
+            mint_time = mint_time.replace(tzinfo=timezone.utc)
+    except ValueError:
+        return "That mint had a date I could not read. Try adding it again from the mini app."
+    if mint_time < datetime.now(timezone.utc):
+        return "%s has already passed — add a future mint to get beeps." % name
+    mints = user_mints(state, chat_id)
+    key = (mint.get("source_key") or "").strip().lower()
+    if key and any(m.get("source_key") == key for m in mints):
+        return "%s is already on your list." % name
+    if any(m.get("name") == name and m.get("mint_time_utc") == mint_time.isoformat() for m in mints):
+        return "%s is already on your list." % name
+    mints.append({"id": next_id(mints), "name": name,
+                 "mint_time_utc": mint_time.isoformat(),
+                 "price": mint.get("price") or "?",
+                 "chain": mint.get("chain") or "?",
+                 "link": mint.get("link") or "",
+                 "note": mint.get("note") or "",
+                 "source_key": key, "sent": []})
+    save_state(state)
+    return ("Tracking %s ✅\n%s · %s\nI will beep you 1 day before, "
+            "1 hour before, and at launch."
+            % (name, fmt_wat(mint_time.isoformat()), mints[-1]["price"]))
+
+
 # ---------------------------------------------------------------- polling loop
 def run_loop():
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
@@ -409,8 +452,16 @@ def run_loop():
             offset = max(offset, update.get("update_id", 0) + 1)
             msg = update.get("message") or {}
             chat = msg.get("chat") or {}
+            if "id" not in chat:
+                continue
+            wad = msg.get("web_app_data") or {}
+            if wad.get("data"):
+                reply = handle_web_app_data(state, chat["id"], wad["data"])
+                if reply:
+                    send_message(chat["id"], reply, token)
+                continue
             text = msg.get("text") or ""
-            if not text or "id" not in chat:
+            if not text:
                 continue
             reply = handle_message(state, chat["id"], text)
             if reply:
@@ -467,6 +518,22 @@ def selftest():
     r = handle_message(state, 1, "/track grant-yun")
     assert "Tracking" in r, r
     assert len(state["users"]["1"]["mints"]) == 2
+    # mini app bridge: Track / Add sends web_app_data, bot must save + beep it
+    r = handle_web_app_data(state, 2, json.dumps({
+        "action": "track", "mint": {"name": "Quacked Ops",
+        "mint_time_utc": "2026-12-01T18:00:00+00:00",
+        "price": "0.02 ETH", "chain": "Base", "link": "",
+        "source_key": "quacked-ops"}}))
+    assert "Tracking" in r, r
+    assert len(state["users"]["2"]["mints"]) == 1
+    r = handle_web_app_data(state, 2, json.dumps({
+        "action": "track", "mint": {"name": "Quacked Ops",
+        "mint_time_utc": "2026-12-01T18:00:00+00:00",
+        "price": "0.02 ETH", "chain": "Base", "link": "",
+        "source_key": "quacked-ops"}}))
+    assert "already" in r, r
+    r = handle_web_app_data(state, 2, "not json")
+    assert "could not read" in r, r
     print("selftest: all checks passed")
     return 0
 
