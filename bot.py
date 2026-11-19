@@ -262,6 +262,11 @@ def due_reminders(mint, now=None):
     Returns at most one — the latest due (launch beats hour beats day)
     — so a bot that was offline does not triple-beep when it returns,
     and a mint added late still gets the next beep, not a stale one.
+    A reminder only fires inside its own window: the 5 minutes after
+    its due time. A 1-hour beep whose due time passed an hour ago
+    (e.g. a mint added 1 minute before launch) is skipped, never
+    fired late — the Tracking reply promises only future beeps, and
+    the beeps themselves must match that promise.
     A mint whose launch window (5 min) has passed gets nothing.
     """
     now = now or datetime.now(timezone.utc)
@@ -275,7 +280,7 @@ def due_reminders(mint, now=None):
         if key == "launch":
             if mint_time <= now:
                 return [key]
-        elif mint_time - offset <= now:
+        elif mint_time - offset <= now < mint_time - offset + timedelta(minutes=5):
             return [key]
     return []
 
@@ -621,15 +626,24 @@ def selftest():
         "2026-11-19T18:00:00+00:00"
     assert parse_mint_time("not a date", now) is None
     assert countdown("2026-11-18T18:00:00+00:00", now) == "9h 0m left"
-    # Grant Yun tonight: 1-day reminder already due (mint - 24h was yesterday),
-    # 1-hour due at 17:00 UTC, launch at 18:00 UTC.
+    # Grant Yun tonight: each beep fires only inside its own 5-minute
+    # window after its due time — a beep whose window already passed
+    # (e.g. the day beep at 10:00, 16h after it was due) is skipped.
     gy = {"id": 1, "name": "Grant Yun — Sections",
           "mint_time_utc": "2026-11-18T18:00:00+00:00",
           "price": "0.05 ETH", "chain": "Ethereum", "link": "", "sent": []}
-    assert due_reminders(gy, now) == ["day"], due_reminders(gy, now)
-    assert due_reminders(gy, dt(2026, 11, 18, 17, 30, tzinfo=timezone.utc)) == ["hour"]
+    assert due_reminders(gy, now) == [], due_reminders(gy, now)
+    assert due_reminders(gy, dt(2026, 11, 17, 18, 2, tzinfo=timezone.utc)) == ["day"]
+    assert due_reminders(gy, dt(2026, 11, 18, 17, 2, tzinfo=timezone.utc)) == ["hour"]
     assert due_reminders(gy, dt(2026, 11, 18, 18, 2, tzinfo=timezone.utc)) == ["launch"]
     assert due_reminders(gy, dt(2026, 11, 18, 18, 10, tzinfo=timezone.utc)) == []
+    # Mint added 1 minute before launch: the 1-hour beep must NOT fire
+    # late (its window passed an hour ago) — only the launch beep.
+    late = {"id": 2, "name": "Dred",
+            "mint_time_utc": "2026-11-19T23:54:00+00:00",
+            "price": "Free", "chain": "Ethereum", "link": "", "sent": []}
+    assert due_reminders(late, dt(2026, 11, 19, 23, 53, tzinfo=timezone.utc)) == []
+    assert due_reminders(late, dt(2026, 11, 19, 23, 54, tzinfo=timezone.utc)) == ["launch"]
     # Tracking reply must only promise beeps still in the future
     assert upcoming_reminders("2026-11-18T18:00:00+00:00",
                                dt(2026, 11, 18, 17, 59, tzinfo=timezone.utc)) == ["at launch"]
