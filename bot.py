@@ -220,9 +220,39 @@ def send_message(chat_id, text, token=None, reply_markup=None):
     return True
 
 
+def upcoming_reminders(mint_time, now=None):
+    """Labels of the beeps still in the future for this mint.
+
+    A mint 1 minute away gets only the launch beep; a mint 12 hours
+    away gets the 1-hour and launch beeps; a mint 2 days away gets
+    all three. The Tracking reply must only promise these, never
+    a 1-day / 1-hour beep whose window has already passed.
+    """
+    now = now or datetime.now(timezone.utc)
+    if isinstance(mint_time, str):
+        mint_time = datetime.fromisoformat(mint_time)
+    labels = []
+    for key, offset, label in REMINDER_OFFSETS:
+        if key == "launch":
+            if mint_time > now:
+                labels.append("at launch")
+        elif mint_time - offset > now:
+            labels.append(label)
+    return labels
+
+
+def beep_promise(mint_time, now=None):
+    labels = upcoming_reminders(mint_time, now)
+    if not labels:
+        return "Minting now."
+    if len(labels) == 1:
+        return "I will beep you %s." % labels[0]
+    return "I will beep you %s, and %s." % (", ".join(labels[:-1]), labels[-1])
+
+
 # ---------------------------------------------------------------- reminders
-REMINDER_OFFSETS = [("day", timedelta(days=1), "1 day to go"),
-                    ("hour", timedelta(hours=1), "1 hour to go"),
+REMINDER_OFFSETS = [("day", timedelta(days=1), "1 day before"),
+                    ("hour", timedelta(hours=1), "1 hour before"),
                     ("launch", timedelta(0), "MINTING NOW")]
 
 
@@ -318,11 +348,11 @@ def handle_message(state, chat_id, text):
         mints.append(draft)
         save_state(state)
         del conversations[str(chat_id)]
-        return ("Saved ✅\n\n%s\n%s · %s\nChain: %s%s\n\n"
-                "I will beep you 1 day before, 1 hour before, and at launch."
+        return ("Saved ✅\n\n%s\n%s · %s\nChain: %s%s\n\n%s"
                 % (draft["name"], fmt_wat(draft["mint_time_utc"]),
                    draft["price"], draft["chain"],
-                   ("\nMint: " + draft["link"]) if draft.get("link") else ""))
+                   ("\nMint: " + draft["link"]) if draft.get("link") else "",
+                   beep_promise(draft["mint_time_utc"])))
 
     if text in ("/start", "/help"):
         return HELP_TEXT
@@ -389,9 +419,9 @@ def handle_message(state, chat_id, text):
                      "chain": v["chain"], "link": v["link"],
                      "note": v.get("note", ""), "source_key": key, "sent": []})
         save_state(state)
-        return ("Tracking %s ✅\n%s · %s\nI will beep you 1 day before, "
-                "1 hour before, and at launch."
-                % (v["name"], fmt_wat(v["mint_time_utc"]), v["price"]))
+        return ("Tracking %s ✅\n%s · %s\n%s"
+                % (v["name"], fmt_wat(v["mint_time_utc"]), v["price"],
+                   beep_promise(v["mint_time_utc"])))
     if text.startswith("/"):
         return "Unknown command. /help lists what I can do."
     return ("Send /add to add a mint, /list to see yours, "
@@ -436,9 +466,9 @@ def handle_web_app_data(state, chat_id, data_str):
                  "note": mint.get("note") or "",
                  "source_key": key, "sent": []})
     save_state(state)
-    return ("Tracking %s ✅\n%s · %s\nI will beep you 1 day before, "
-            "1 hour before, and at launch."
-            % (name, fmt_wat(mint_time.isoformat()), mints[-1]["price"]))
+    return ("Tracking %s ✅\n%s · %s\n%s"
+            % (name, fmt_wat(mint_time.isoformat()), mints[-1]["price"],
+               beep_promise(mint_time.isoformat())))
 
 
 # ---------------------------------------------------------------- polling loop
@@ -533,6 +563,11 @@ def run_loop():
             continue
         for update in body.get("result", []):
             offset = max(offset, update.get("update_id", 0) + 1)
+            # Reload from disk on every update: the bridge server saves
+            # mints to the same file, and a stale in-memory copy would
+            # make /list miss mints the bridge just saved (and could
+            # overwrite them on the next save).
+            state = load_state()
             msg = update.get("message") or {}
             chat = msg.get("chat") or {}
             if "id" not in chat:
@@ -559,6 +594,7 @@ def run_loop():
                 send_message(chat["id"], reply, token, reply_markup=markup)
         if time.time() - last_check >= CHECK_SECONDS:
             last_check = time.time()
+            state = load_state()
             try:
                 n = check_reminders(state)
                 if n:
@@ -594,6 +630,15 @@ def selftest():
     assert due_reminders(gy, dt(2026, 11, 18, 17, 30, tzinfo=timezone.utc)) == ["hour"]
     assert due_reminders(gy, dt(2026, 11, 18, 18, 2, tzinfo=timezone.utc)) == ["launch"]
     assert due_reminders(gy, dt(2026, 11, 18, 18, 10, tzinfo=timezone.utc)) == []
+    # Tracking reply must only promise beeps still in the future
+    assert upcoming_reminders("2026-11-18T18:00:00+00:00",
+                               dt(2026, 11, 18, 17, 59, tzinfo=timezone.utc)) == ["at launch"]
+    assert upcoming_reminders("2026-11-18T18:00:00+00:00",
+                               dt(2026, 11, 18, 10, 0, tzinfo=timezone.utc)) == ["1 hour before", "at launch"]
+    assert upcoming_reminders("2026-11-20T18:00:00+00:00",
+                               dt(2026, 11, 18, 10, 0, tzinfo=timezone.utc)) == ["1 day before", "1 hour before", "at launch"]
+    assert beep_promise("2026-11-18T18:00:00+00:00",
+                        dt(2026, 11, 18, 17, 59, tzinfo=timezone.utc)) == "I will beep you at launch."
     # /add flow end-to-end in memory (dry-run sends print, never hit network)
     state = {"users": {}}
     assert "step" not in handle_message(state, 1, "/add")  # returns prompt
