@@ -43,10 +43,12 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 WAT = timezone(timedelta(hours=1))  # Africa/Lagos, UTC+1, no DST
 
@@ -440,6 +442,74 @@ def handle_web_app_data(state, chat_id, data_str):
 
 
 # ---------------------------------------------------------------- polling loop
+# ---------------------------------------------------------------- direct HTTP bridge
+# The mini app (GitHub Pages) now sends Track/Add straight to the bot
+# over HTTP, instead of only Telegram's sendData — sendData silently
+# drops the message on link/menu launches, which is why mints added
+# in the app never landed on the bot's /list. The app POSTs
+# {"chat_id": <Telegram user id>, "mint": {...}} to /track; the bot
+# saves it with the same rules as handle_web_app_data and replies
+# "Tracking" in the bot chat, so /list shows it. CORS is open for the
+# GitHub Pages origin (the page is public, the chat_id is the only
+# key, and a mint only ever beeps its own owner).
+BOT_HTTP_URL = "https://nft-mint-tracker-production.up.railway.app"
+
+
+class _BridgeHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args):
+        pass
+
+    def _send_json(self, code, obj):
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_OPTIONS(self):
+        self._send_json(200, {"ok": True})
+
+    def do_GET(self):
+        self._send_json(200, {"ok": True, "service": "mint-tracker-bot"})
+
+    def do_POST(self):
+        if self.path.rstrip("/") != "/track":
+            self._send_json(404, {"ok": False, "error": "not found"})
+            return
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            data = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+        except Exception:
+            self._send_json(400, {"ok": False, "error": "bad json"})
+            return
+        chat_id = data.get("chat_id")
+        mint = data.get("mint") or {}
+        if not isinstance(chat_id, int) or chat_id <= 0 or not mint.get("name"):
+            self._send_json(400, {"ok": False, "error": "chat_id and mint.name required"})
+            return
+        state = load_state()
+        reply = handle_web_app_data(state, chat_id, json.dumps({"mint": mint}))
+        ok = reply.startswith("Tracking")
+        if reply:
+            try:
+                send_message(chat_id, reply)
+            except Exception as exc:
+                print("ERROR sending Tracking reply: %s" % exc, file=sys.stderr)
+        self._send_json(200 if ok else 400, {"ok": ok, "reply": reply})
+
+
+def start_bridge_server():
+    port = int(os.environ.get("PORT", "8080"))
+    server = ThreadingHTTPServer(("0.0.0.0", port), _BridgeHandler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    print("Mint Tracker bridge listening on port %d" % port)
+    return server
+
+
 def run_loop():
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
     if not token:
@@ -450,6 +520,10 @@ def run_loop():
     offset = 0
     last_check = 0.0
     print("Mint Tracker bot running. State: %s" % STATE_PATH)
+    try:
+        start_bridge_server()
+    except Exception as exc:
+        print("bridge server failed to start: %s" % exc, file=sys.stderr)
     while True:
         try:
             body = api("getUpdates", {"offset": offset, "timeout": 20}, token)
