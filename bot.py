@@ -88,10 +88,16 @@ ADD_PROMPTS = {
     "link": "Mint link? Paste the URL — or send `none` if there is none yet.",
 }
 
+MINI_APP_URL = "https://wave-13.github.io/mint-tracker-mini-app/"
+
 HELP_TEXT = (
     "NFT Mint Tracker — never miss a mint again.\n\n"
     "Add the mints YOU care about and I beep you 1 day before, "
     "1 hour before, and at launch, with price, chain and link.\n\n"
+    "Tap \"Open Mint Tracker\" below to open the calendar — "
+    "Track in there sends the mint straight to me, and I save it "
+    "and beep you. (Opening the calendar from a plain link will not "
+    "send it to me — use the button below.)\n\n"
     "/add — add a mint, step by step\n"
     "/list — your mints, with countdowns\n"
     "/delete — remove one of your mints\n"
@@ -193,13 +199,16 @@ def api(method, payload=None, token=None):
         return json.loads(resp.read().decode("utf-8"))
 
 
-def send_message(chat_id, text, token=None):
+def send_message(chat_id, text, token=None, reply_markup=None):
     if DRY_RUN:
         print("[dry-run] -> %s:\n%s\n" % (chat_id, text))
         return True
     try:
-        body = api("sendMessage", {"chat_id": chat_id, "text": text,
-                                   "disable_web_page_preview": True}, token)
+        payload = {"chat_id": chat_id, "text": text,
+                   "disable_web_page_preview": True}
+        if reply_markup is not None:
+            payload["reply_markup"] = reply_markup
+        body = api("sendMessage", payload, token)
     except Exception as exc:
         print("ERROR sending to %s: %s" % (chat_id, exc), file=sys.stderr)
         return False
@@ -465,7 +474,15 @@ def run_loop():
                 continue
             reply = handle_message(state, chat["id"], text)
             if reply:
-                send_message(chat["id"], reply, token)
+                markup = None
+                if text.strip() in ("/start", "/help"):
+                    # Keyboard button is the only launch that lets the mini
+                    # app send data back to the bot (Telegram's sendData
+                    # rule) — a plain link / menu launch cannot send it.
+                    markup = {"keyboard": [[{"text": "Open Mint Tracker",
+                                              "web_app": {"url": MINI_APP_URL}}]],
+                              "resize_keyboard": True}
+                send_message(chat["id"], reply, token, reply_markup=markup)
         if time.time() - last_check >= CHECK_SECONDS:
             last_check = time.time()
             try:
