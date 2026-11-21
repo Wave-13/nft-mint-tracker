@@ -92,6 +92,15 @@ ADD_PROMPTS = {
 
 MINI_APP_URL = "https://wave-13.github.io/mint-tracker-mini-app/"
 
+START_TEXT = (
+    "Welcome to Mint Tracker \U0001f44b\n\n"
+    "Your mint calendar lives in the app, not here.\n\n"
+    "Tap \u201cOpen Mint Tracker\u201d below to see it, track a mint, "
+    "and get beeped before it drops \u2014 1 day before, 1 hour before, "
+    "and at launch.\n\n"
+    "Everything happens in the app."
+)
+
 HELP_TEXT = (
     "NFT Mint Tracker — never miss a mint again.\n\n"
     "Add the mints YOU care about and I beep you 1 day before, "
@@ -359,7 +368,9 @@ def handle_message(state, chat_id, text):
                    ("\nMint: " + draft["link"]) if draft.get("link") else "",
                    beep_promise(draft["mint_time_utc"])))
 
-    if text in ("/start", "/help"):
+    if text == "/start":
+        return START_TEXT
+    if text == "/help":
         return HELP_TEXT
     if text == "/add":
         conversations[str(chat_id)] = {"step": "name", "draft": {}}
