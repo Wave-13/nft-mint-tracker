@@ -332,6 +332,10 @@ def check_reminders(state, now=None):
 conversations = {}
 
 
+# Only the owner sees /stats. This is the user's own Telegram id.
+OWNER_CHAT_ID = 5601504588
+
+
 def stats_text(state):
     users = state.get("users") or {}
     tracking = [u for u in users.values() if u.get("mints")]
@@ -391,6 +395,8 @@ def handle_message(state, chat_id, text):
                    beep_promise(draft["mint_time_utc"])))
 
     if text == "/stats":
+        if int(chat_id) != OWNER_CHAT_ID:
+            return "Stats are private — only the owner can see them."
         return stats_text(state)
     if text == "/start":
         return START_TEXT
@@ -544,19 +550,6 @@ class _BridgeHandler(BaseHTTPRequestHandler):
         self._send_json(200, {"ok": True})
 
     def do_GET(self):
-        if self.path.rstrip("/") == "/stats":
-            state = load_state()
-            users = state.get("users") or {}
-            tracking = [u for u in users.values() if u.get("mints")]
-            self._send_json(200, {
-                "ok": True,
-                "people_tracking": len(tracking),
-                "mints_tracked": sum(len(u.get("mints", [])) for u in tracking),
-                "beeps_sent": sum(len(m.get("sent", [])) for u in tracking for m in u.get("mints", [])),
-                "app_opens": int(state.get("app_opens") or 0),
-                "unique_app_visitors": len(state.get("visitors") or {}),
-            })
-            return
         self._send_json(200, {"ok": True, "service": "mint-tracker-bot"})
 
     def do_POST(self):
