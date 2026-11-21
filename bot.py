@@ -114,6 +114,7 @@ HELP_TEXT = (
     "/delete — remove one of your mints\n"
     "/upcoming — verified mints (Grant Yun, Quacked Ops)\n"
     "/track grant-yun — follow a verified mint\n"
+    "/stats — how many people use Mint Tracker\n"
     "/help — this list again\n\n"
     "Your list is yours alone — nobody else sees what you add."
 )
@@ -125,10 +126,12 @@ def load_state():
         with open(STATE_PATH, "r", encoding="utf-8") as fh:
             data = json.load(fh)
         if isinstance(data, dict) and "users" in data:
+            data.setdefault("visitors", {})
+            data.setdefault("app_opens", 0)
             return data
     except (FileNotFoundError, ValueError):
         pass
-    return {"users": {}}
+    return {"users": {}, "visitors": {}, "app_opens": 0}
 
 
 def save_state(state):
@@ -329,6 +332,25 @@ def check_reminders(state, now=None):
 conversations = {}
 
 
+def stats_text(state):
+    users = state.get("users") or {}
+    tracking = [u for u in users.values() if u.get("mints")]
+    total_mints = sum(len(u.get("mints", [])) for u in tracking)
+    beeps = sum(len(m.get("sent", [])) for u in tracking for m in u.get("mints", []))
+    lines = ["Mint Tracker — stats\n"]
+    lines.append("People tracking: %d" % len(tracking))
+    lines.append("Mints tracked: %d" % total_mints)
+    lines.append("Beeps sent: %d" % beeps)
+    for v in VERIFIED_MINTS:
+        n = sum(1 for u in tracking
+                if any(m.get("source_key") == v["key"] for m in u.get("mints", [])))
+        lines.append("Tracking %s: %d" % (v["name"], n))
+    visitors = state.get("visitors") or {}
+    lines.append("App opens: %d" % int(state.get("app_opens") or 0))
+    lines.append("Unique app visitors: %d" % len(visitors))
+    return "\n".join(lines)
+
+
 def handle_message(state, chat_id, text):
     """Returns reply text (or None if already handled/sent)."""
     text = (text or "").strip()
@@ -368,6 +390,8 @@ def handle_message(state, chat_id, text):
                    ("\nMint: " + draft["link"]) if draft.get("link") else "",
                    beep_promise(draft["mint_time_utc"])))
 
+    if text == "/stats":
+        return stats_text(state)
     if text == "/start":
         return START_TEXT
     if text == "/help":
@@ -520,9 +544,42 @@ class _BridgeHandler(BaseHTTPRequestHandler):
         self._send_json(200, {"ok": True})
 
     def do_GET(self):
+        if self.path.rstrip("/") == "/stats":
+            state = load_state()
+            users = state.get("users") or {}
+            tracking = [u for u in users.values() if u.get("mints")]
+            self._send_json(200, {
+                "ok": True,
+                "people_tracking": len(tracking),
+                "mints_tracked": sum(len(u.get("mints", [])) for u in tracking),
+                "beeps_sent": sum(len(m.get("sent", [])) for u in tracking for m in u.get("mints", [])),
+                "app_opens": int(state.get("app_opens") or 0),
+                "unique_app_visitors": len(state.get("visitors") or {}),
+            })
+            return
         self._send_json(200, {"ok": True, "service": "mint-tracker-bot"})
 
     def do_POST(self):
+        if self.path.rstrip("/") == "/ping":
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+                data = json.loads(self.rfile.read(length).decode("utf-8") or "{}")
+            except Exception:
+                self._send_json(400, {"ok": False, "error": "bad json"})
+                return
+            vid = str(data.get("visitor_id") or "").strip()
+            if not vid:
+                self._send_json(400, {"ok": False, "error": "visitor_id required"})
+                return
+            state = load_state()
+            state.setdefault("visitors", {})
+            state.setdefault("app_opens", 0)
+            if vid not in state["visitors"]:
+                state["visitors"][vid] = time.strftime("%Y-%m-%d", time.gmtime())
+            state["app_opens"] = int(state.get("app_opens") or 0) + 1
+            save_state(state)
+            self._send_json(200, {"ok": True})
+            return
         if self.path.rstrip("/") != "/track":
             self._send_json(404, {"ok": False, "error": "not found"})
             return
